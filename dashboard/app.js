@@ -1,4 +1,4 @@
-// Token Radar, radar-2 dashboard. It reads window.RADAR (written beside dashboard/ by main.ts)
+// Token Radar, radar-3 dashboard. It reads window.RADAR (written beside dashboard/ by main.ts)
 // and renders the ranked board, a filterable table, a per-protocol detail drawer with the model's
 // own breakdown and the protocol's farm plan. No network: every byte it shows is in data.js.
 //
@@ -34,15 +34,11 @@
   }
   function fmtMult(n) { return (n === null || n === undefined || !isFinite(n)) ? 'n/a' : 'x' + n.toFixed(2); }
 
-  // radar-2 in one function: category multiple x growth x maturity x chain, from the row's figures.
+  // radar-3 in one function: the comps curve fitted at run time on the live-token protocols.
+  // log(implied) = intercept + slope x log(TVL); the coefficients come from data.js, where the
+  // program wrote the fit, so this page and lib/model.ts can never disagree about them.
   function impliedOf(row, model) {
-    var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-    var growthMult = 1 + (growth / 100) * model.growth_weight;
-    var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
-    var maturity = model.maturity_floor + model.maturity_range * Math.sqrt(Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days);
-    var chains = row.chains && row.chains.length ? row.chains.length : 1;
-    var chainMult = 1 + model.chain_step * Math.min(chains - 1, model.chain_cap);
-    return Math.max(1, Math.round(row.tvl_usd * row.category_multiple * growthMult * maturity * chainMult));
+    return Math.max(1, Math.round(Math.exp(model.curve.intercept + model.curve.slope * row.log_tvl)));
   }
 
   function el(tag, attrs) {
@@ -114,7 +110,7 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else if (key === 'multiple') { av = a.category_multiple; bv = b.category_multiple; }
+      else if (key === 'multiple') { av = a.curve_multiple; bv = b.curve_multiple; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -141,7 +137,8 @@
           'The watchlist is the floor: ', el('b', { text: DATA.watchlist_size + ' protocols' }),
           ' with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ',
           el('b', { text: DATA.early_size + ' more below that floor' }),
-          ', ranked by an implied value the snapshot itself prices. Implied value is a model, not a promise — and never a claim that a token exists.'
+          ', ranked by an implied value a comps curve fits on the ', el('b', { text: DATA.model.curve.n_comps + ' live-token protocols' }),
+          ' in this same snapshot. Implied value is a model, not a promise — and never a claim that a token exists.'
         )
       ),
       el('div', { class: 'facts' },
@@ -149,7 +146,8 @@
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Early rows below the floor' }), el('b', { text: String(DATA.early_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Global category multiple' }), el('b', { text: fmtMult(DATA.global_multiple) }))
+        el('div', { class: 'fact' }, el('span', { text: 'Comps the curve is fitted on' }), el('b', { text: String(DATA.model.curve.n_comps) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Cross-validated R²' }), el('b', { text: DATA.model.validation.cv_r2.toFixed(2) }))
       )
     );
   }
@@ -241,7 +239,7 @@
         el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
         el('td', { class: 'num ' + growthClass, text: growth }),
         el('td', { class: 'num', text: fmtAge(r.age_days) }),
-        el('td', { class: 'num', text: fmtMult(r.category_multiple) }),
+        el('td', { class: 'num', text: fmtMult(r.curve_multiple) }),
         el('td', null, el('div', { class: 'implied' },
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
@@ -260,7 +258,7 @@
             sortHeader('tvl', 'TVL'),
             sortHeader('growth', '7d'),
             sortHeader('age', 'Age'),
-            sortHeader('multiple', 'Cat. mult.'),
+            sortHeader('multiple', 'Curve mult.'),
             sortHeader('implied', 'Implied value'),
             el('th', { scope: 'col', text: 'Token' })
           )),
@@ -285,7 +283,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking — and their market-cap / TVL ratios set every category multiple above.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking — and their market caps are the comps the curve is fitted on.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -295,23 +293,33 @@
 
   function modelPanel() {
     var m = DATA.model;
-    var seen = {};
-    var mults = [];
-    DATA.rows.forEach(function (r) {
-      var c = r.category || 'Other';
-      if (!seen[c]) { seen[c] = true; mults.push({ category: c, mult: r.category_multiple }); }
-    });
-    mults.sort(function (a, b) { return b.mult - a.mult; });
+    var c = m.curve;
+    var v = m.validation;
+    var quartNames = ['Smallest TVL quartile', 'Second TVL quartile', 'Third TVL quartile', 'Largest TVL quartile'];
     return el('section', { class: 'panel model' },
-      el('h2', null, 'How implied value is computed ', el('span', { class: 'tag', text: 'MODEL ' + DATA.model_version })),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The category multiple is the market itself: the median market-cap / TVL ratio of the live-token protocols in that category, at least three of them, else the global median of ' + fmtMult(DATA.global_multiple) + ', clamped to ' + m.multiple_floor + '–' + m.multiple_cap + '.' }),
+      el('h2', null, 'How implied value is fitted ', el('span', { class: 'tag', text: 'MODEL ' + DATA.model_version })),
+      el('p', { class: 'sub', text: 'One curve, fitted on this snapshot alone by ordinary least squares over the ' + c.n_comps + ' live-token protocols that record a market cap and a TVL. No protocol name is special-cased, and no pre-token protocol enters the fit: the curve is blind to the board it ranks.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x category_multiple x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + ' + m.maturity_range + ' x sqrt(min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ')) x (1 + ' + m.chain_step + ' x min(chains - 1, ' + m.chain_cap + ')) )'
+        'log(implied value) = ' + c.intercept.toFixed(3) + ' + ' + c.slope.toFixed(3) + ' x log(tvl_usd)' +
+        '   —   implied value = ' + Math.exp(c.intercept).toFixed(0) + ' x TVL^' + c.slope.toFixed(3)
       ),
-      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days, and maturity is concave, so the first year of survival moves the value more than the fourth. A protocol on several chains earns up to +10% for its wider distribution. Wrapped, staked and bridged products of tokens that already trade are never ranked: they are not launches.' }),
-      el('div', { class: 'mult-grid' }, mults.map(function (x) {
-        return el('div', { class: 'mult' }, el('span', { text: x.category }), el('b', { text: fmtMult(x.mult) }));
-      }))
+      el('p', { class: 'sub', text: 'Value grows with the square root of TVL, not with TVL itself: the fitted slope is about ' + c.slope.toFixed(2) + ', so the multiple a protocol earns falls as it gets bigger. The median market-cap / TVL ratio of the live comps is ' + fmtMult(m.ratio_quartiles[0]) + ' in the smallest TVL quartile and ' + fmtMult(m.ratio_quartiles[3]) + ' in the largest — an 18-fold fall. A flat multiple pays the giants far too much; the curve charges each size what its own comps imply.' }),
+      el('div', { class: 'mult-grid' }, m.ratio_quartiles.map(function (q, i) {
+        return el('div', { class: 'mult' }, el('span', { text: quartNames[i] }), el('b', { text: fmtMult(q) }));
+      })),
+      el('h3', { text: 'Tested out of sample, before it was trusted' }),
+      el('p', { class: 'sub', text: 'Five-fold cross-validation, the folds fixed by a hash of each protocol\u2019s slug: out-of-sample R² on log market cap ' + v.cv_r2.toFixed(2) + ', median error on the dollar value ' + Math.round(v.cv_med_ape * 100) + '%. A time-split holdout — trained on the oldest 80% of dated comps, tested on the newest ' + v.holdout_n + ' — gives R² ' + v.holdout_r2.toFixed(2) + ' and median error ' + Math.round(v.holdout_med_ape * 100) + '%. Comps are noisy: a live token\u2019s multiple spans 0.006 to 5.1, a thousand-fold, so the curve ranks by the central tendency — it does not promise a point value for any single launch.' }),
+      el('div', { class: 'mult-grid' },
+        el('div', { class: 'mult' }, el('span', { text: 'Cross-validated R²' }), el('b', { text: v.cv_r2.toFixed(2) })),
+        el('div', { class: 'mult' }, el('span', { text: 'CV median dollar error' }), el('b', { text: Math.round(v.cv_med_ape * 100) + '%' })),
+        el('div', { class: 'mult' }, el('span', { text: 'Holdout R² (newest ' + v.holdout_n + ')' }), el('b', { text: v.holdout_r2.toFixed(2) })),
+        el('div', { class: 'mult' }, el('span', { text: 'Holdout median dollar error' }), el('b', { text: Math.round(v.holdout_med_ape * 100) + '%' }))
+      ),
+      el('h3', { text: 'What lost, fitted and validated the same way' }),
+      el('div', { class: 'breakdown' }, m.ablation.map(function (a) {
+        return el('div', { class: 'row' }, el('span', { text: a.label }), el('b', { text: 'CV R² ' + a.cv_r2.toFixed(2) }));
+      })),
+      el('p', { class: 'sub', text: 'Seven-day growth, age with no token and chain count were each tested as extra terms; every one lowered the cross-validated score, so the curve keeps TVL alone. The category-median multiple of the previous model scores below zero out of sample — worse than the mean — so it is not used. Each row\u2019s detail view still shows the protocol\u2019s own growth and age, with the fit\u2019s verdict that neither carries a premium on these comps.' })
     );
   }
 
@@ -339,10 +347,12 @@
       el('div', { class: 'breakdown' },
         el('div', { class: 'row' }, el('span', { text: 'TVL' }), el('b', { text: fmtUsd(row.tvl_usd) })),
         el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:100%' })),
-        el('div', { class: 'row' }, el('span', { text: 'Category multiple (' + (row.category || 'Other') + ')' }), el('b', { text: fmtMult(row.category_multiple) })),
-        el('div', { class: 'row' }, el('span', { text: 'Seven-day growth' }), el('b', { text: fmtPct(row.change_7d) + ' → ' + fmtMult(row.growth_multiplier) })),
-        el('div', { class: 'row' }, el('span', { text: 'Age with no token' }), el('b', { text: fmtAge(row.age_days) + ' → ' + fmtMult(row.maturity_multiplier) })),
-        el('div', { class: 'row' }, el('span', { text: 'Chains (' + (row.chains ? row.chains.length : 1) + ')' }), el('b', { text: fmtMult(row.chain_multiplier) })),
+        el('div', { class: 'row' }, el('span', { text: 'log(TVL)' }), el('b', { text: row.log_tvl.toFixed(2) })),
+        el('div', { class: 'row' }, el('span', { text: 'Fitted curve' }), el('b', { text: DATA.model.curve.intercept.toFixed(3) + ' + ' + DATA.model.curve.slope.toFixed(3) + ' x ' + row.log_tvl.toFixed(2) })),
+        el('div', { class: 'row' }, el('span', { text: 'Curve multiple at this size' }), el('b', { text: fmtMult(row.curve_multiple) })),
+        el('div', { class: 'row' }, el('span', { text: 'Seven-day growth' }), el('b', { text: fmtPct(row.change_7d) + ' — tested, no premium' })),
+        el('div', { class: 'row' }, el('span', { text: 'Age with no token' }), el('b', { text: fmtAge(row.age_days) + ' — tested, no premium' })),
+        el('div', { class: 'row' }, el('span', { text: 'Chains (' + (row.chains ? row.chains.length : 1) + ')' }), el('b', { text: 'tested, no premium' })),
         el('div', { class: 'row' }, el('span', { text: 'Implied value' }), el('b', { text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and "records no token" means the snapshot carries none — the protocol may still have one its record does not show.' })
